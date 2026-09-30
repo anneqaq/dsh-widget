@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Inline Widgets",
+    "description": "Renders model-authored SVG or HTML fragments as isolated visual cards in the conversation: diagrams, charts, timelines, and comparison tables instead of prose."
+  }
+}

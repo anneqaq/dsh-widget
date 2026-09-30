@@ -1,0 +1,13 @@
+# dsh-widget bundle patch.
+#
+# Applied after the dsh-base and dsh-web-app bundle layers. This inserts the
+# plugin's own node-half row into the Loader tree; the browser half ships
+# separately through package.json -> dsh.client and is served from
+# exports["./client"], so it needs no row here.
+#
+# The node half owns only the `render_widget` tool registration. Its `apply` is
+# deliberately tiny: producing the visual is the client slot's job.
+
+- insert:
+    - id: dsh-widget
+      name: dsh-widget
