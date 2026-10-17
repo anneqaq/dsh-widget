@@ -89,15 +89,52 @@ test('output.schema is closed and names every required field', () => {
 })
 
 test('execute reports a rendered widget without echoing the fragment', async () => {
-  const value = await tool.execute({ html: '<svg viewBox="0 0 10 10"/>', height: 300 })
+  const html = '<svg viewBox="0 0 10 10"/>'
+  const value = await tool.execute({ html, height: 300 })
   assert.deepEqual(value, {
     rendered: true,
-    bytes: Buffer.byteLength('<svg viewBox="0 0 10 10"/>', 'utf8'),
+    bytes: Buffer.byteLength(html, 'utf8'),
     height: 300,
     scripted: false,
+    estTokens: Math.ceil(Buffer.byteLength(html, 'utf8') / 3),
+    overBudget: false,
   })
   // The acknowledgement is what re-enters the model context, so it must stay small.
   assert.ok(JSON.stringify(value).length < 200)
+})
+
+test('execute reports a cost estimate that does not under-count CJK bytes', async () => {
+  // A Chinese character is 3 UTF-8 bytes and roughly one token, so counting
+  // characters (the harness meter's rule) would understate this by ~3x.
+  const value = await tool.execute({ html: '<text>中文标签</text>' })
+  assert.equal(value.estTokens, Math.ceil(value.bytes / 3))
+  assert.ok(value.estTokens >= '</text>'.length, 'a CJK-heavy fragment must not be priced per character')
+})
+
+test('execute flags a fragment past the soft budget without rejecting it', async () => {
+  const under = await tool.execute({ html: 'x'.repeat(8 * 1024) })
+  assert.equal(under.overBudget, false, 'the soft line is exclusive, matching the hard ceiling')
+  const over = await tool.execute({ html: 'x'.repeat(8 * 1024 + 1) })
+  assert.equal(over.overBudget, true)
+  // Soft means soft: it still renders, so the model gets a signal rather than a failure.
+  assert.equal(over.rendered, true)
+})
+
+test('render warns the model only when the soft budget was crossed', () => {
+  const base = { rendered: true, bytes: 100, height: 420, scripted: false, estTokens: 34 }
+  const quiet = tool.output.render({}, { ...base, overBudget: false })[0].text
+  const loud = tool.output.render({}, { ...base, overBudget: true })[0].text
+  assert.match(quiet, /~34 tokens/)
+  assert.ok(!/soft budget/i.test(quiet), 'a fragment inside the budget must not be nagged about')
+  assert.match(loud, /soft budget/i)
+  assert.match(loud, /split/i)
+})
+
+test('render still tells the model not to repeat the markup', () => {
+  const blocks = tool.output.render({}, { rendered: true, bytes: 12, height: 420, scripted: false, estTokens: 4, overBudget: false })
+  assert.equal(blocks.length, 1)
+  assert.match(blocks[0].text, /do not repeat/i)
+  assert.ok(!blocks[0].text.includes('<p>x</p>'), 'the ack must not carry the fragment back to the model')
 })
 
 test('execute rejects a missing or empty fragment', async () => {
@@ -141,15 +178,6 @@ test('execute counts bytes rather than characters', async () => {
   const value = await tool.execute({ html: fragment })
   assert.equal(value.bytes, Buffer.byteLength(fragment, 'utf8'))
   assert.notEqual(value.bytes, fragment.length)
-})
-
-test('render steers the model away from repeating the markup', () => {
-  const value = { rendered: true, bytes: 12, height: 420, scripted: false }
-  const blocks = tool.output.render({ html: '<p>x</p>' }, value)
-  assert.equal(blocks.length, 1)
-  assert.equal(blocks[0].type, 'text')
-  assert.match(blocks[0].text, /do not repeat/i)
-  assert.ok(!blocks[0].text.includes('<p>x</p>'), 'the ack must not carry the fragment back to the model')
 })
 
 test('render stays honest when nothing was drawn', () => {

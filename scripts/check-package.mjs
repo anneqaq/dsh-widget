@@ -69,10 +69,13 @@ check('the client half is reachable through exports', () => {
 check('engines.dsh is a well-formed multi-clause range', () => {
   const range = pkg.engines?.dsh
   assert.ok(typeof range === 'string' && range.trim() !== '', 'engines.dsh must be declared')
+  // Both comparators may carry a prerelease. The upper bound's matters as much
+  // as the lower one's: `<0.3.0` admits `0.3.0-rc.1` under `includePrerelease`,
+  // so an upper bound that has to stop *before* the next line says `<0.3.0-0`.
   for (const clause of range.split('||')) {
     assert.match(
       clause.trim(),
-      /^>=\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\s+<\d+\.\d+\.\d+$/,
+      /^>=\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\s+<\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/,
       `unexpected clause ${JSON.stringify(clause.trim())}`,
     )
   }

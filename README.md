@@ -9,7 +9,7 @@ layouts — instead of being described in prose.
 
 [![test](https://github.com/anneqaq/dsh-widget/actions/workflows/test.yml/badge.svg)](https://github.com/anneqaq/dsh-widget/actions/workflows/test.yml)
 ![license](https://img.shields.io/badge/license-MIT-blue)
-![dsh](https://img.shields.io/badge/dsh-0.1.2--rc.1%20%7C%7C%200.1.5--alpha.1%20%7C%7C%200.1.6--0%20%7C%7C%200.1.7--0-blue)
+![dsh](https://img.shields.io/badge/dsh-0.1.x%20%7C%7C%200.2.x-blue)
 
 ## Install
 
@@ -66,9 +66,11 @@ visual and it calls `render_widget`:
 | `height` | no | Frame height in CSS pixels. Default 420, clamped to 80–2000. |
 | `allowScripts` | no | Enable scripts inside the fragment. Off by default. |
 
-The tool returns only a short acknowledgement. The fragment is **not** echoed
-back into the model context — the card reads it from the logged call arguments,
-so a large diagram costs one copy in the transcript, not two.
+The tool returns only a short acknowledgement — including an `estTokens`
+estimate and an `overBudget` flag once a fragment passes the 8 KB soft line. The
+fragment is **not** echoed back into the model context — the card reads it from
+the logged call arguments, so a large diagram costs one copy in the transcript,
+not two.
 
 ## How it works
 
@@ -83,7 +85,7 @@ dsh-widget/
 ├── lib/
 │   ├── index.js        node half  → registers the tool + one prompt section
 │   └── client.js       browser half → renders the tool's calls
-└── test/               36 tests, no browser and no harness required
+└── test/               54 tests, no browser and no harness required
 ```
 
 **Node half** registers a plain `ToolDefinition` and a system-prompt section
@@ -129,8 +131,19 @@ renders through a **sandboxed `srcdoc` frame**, never through
   Reading a half-arrived fragment would render broken markup, so the view shows
   a placeholder until `html` is complete — which is usually before the tool
   result lands.
-- **512 KB per fragment.** The markup is stored in the session log, so the
-  ceiling bounds the transcript as well as the wire request.
+- **A cut-off fragment is salvaged, not lost.** A step that exhausts the model's
+  output ceiling is killed *before* its tool call executes, so the call is never
+  settled while the session is open and its fragment may never close. The view
+  recovers the prefix that did arrive, marks the card as cut short, and — when a
+  reopen closes the call as `TOOL_NOT_STARTED` — recovers it from the stored
+  arguments too. If a still-streaming payload stops growing for 20s it is treated
+  as dead and salvaged the same way; recovery is non-destructive, so a late chunk
+  simply supersedes the partial card.
+- **8 KB soft budget, 512 KB hard ceiling.** The model is told when a fragment
+  crosses the soft line, because the real limit is the step's *token* budget: a
+  512 KB fragment costs more output tokens than the step can produce, so the
+  ceiling is unreachable and the budget is what actually binds. The hard ceiling
+  still bounds the transcript and the wire request.
 - **No network in the frame**, by design. Inline everything.
 - **The card is a tool row, not prose.** It renders where the call sits in the
   turn. Inline-in-the-middle-of-a-paragraph rendering is not available through
@@ -140,20 +153,36 @@ renders through a **sandboxed `srcdoc` frame**, never through
 ## Compatibility
 
 `package.json` declares `engines.dsh` as
-`>=0.1.2-rc.1 <0.2.0 || >=0.1.5-alpha.1 <0.2.0 || >=0.1.6-0 <0.2.0 || >=0.1.7-0 <0.2.0`.
+`>=0.1.2-rc.1 <0.2.0 || >=0.1.5-alpha.1 <0.2.0 || >=0.1.6-0 <0.2.0 || >=0.1.7-0 <0.2.0 || >=0.2.0 <0.3.0-0`.
 
 The multi-clause `||` form is required by semver's prerelease rule: a
 prerelease version only satisfies a comparator set when a comparator in the
 same `[major, minor, patch]` tuple carries a prerelease, so a bare
 `>=0.1.2-rc.1 <0.2.0` does **not** admit `0.1.5-rc.1`. Every new upstream
-prerelease tuple needs its own clause.
+prerelease tuple needs its own clause. The 0.2 clause ends at `<0.3.0-0`
+rather than `<0.3.0` for the mirror-image reason: a plain upper bound already
+admits that line's own prereleases, so `<0.3.0` would silently claim
+compatibility with `0.3.0-rc.1`.
 
-Developed and verified against `0.1.7-rc.2`. This package deliberately declares
-**no `peerDependencies`** on `@deepseek-ai/dsh-*`: it imports no host package,
-and `peerDependencies` is an enforced install gate
-(`evaluatePluginCompatibility`, fail-closed), so declaring one would add a gate
-without adding truth. `engines.dsh` is declarative and is what the plugin market
-reads for its compatibility display.
+**This field is a hard gate, not documentation.** `dsh` evaluates it twice on
+the way in. An unsatisfied `engines.dsh` makes `loadProfileDirectory` skip the
+whole bundle — so `cordis.patch.yml` never composes and no Loader row is
+inserted — and `prepareProfileEntries` disables any row that still reaches the
+tree. A range that stops below the running `dsh` therefore makes the plugin
+disappear: no `render_widget` tool, no card, and nothing on screen saying why.
+The 0.1-only range this package shipped before 0.1.1 did exactly that on
+`0.2.1-rc.2`.
+
+Verified against `0.1.7-rc.2` and `0.2.1-rc.2`. Both client argument wires are
+read: 0.2 replaced a streaming call's closing `argsRaw` string with an `args`
+view that answers per field (`text`, `complete`, `keys`), and the card accepts
+either one, because a reopened session replays nodes written by whichever build
+produced them.
+
+This package deliberately declares **no `peerDependencies`** on
+`@deepseek-ai/dsh-*`: it imports no host package, and `peerDependencies` is an
+enforced install gate (`evaluatePluginCompatibility`, fail-closed), so declaring
+one would add a gate without adding truth.
 
 ## Development
 
@@ -161,13 +190,15 @@ reads for its compatibility display.
 npm test
 ```
 
-36 tests, no browser and no harness required. They run the real projections:
-the streaming-JSON recovery that decides whether a card renders, the frame's
-CSP, and the tool contract.
+63 tests, no browser and no harness required. They run the real projections:
+the streaming-JSON recovery that decides whether a card renders or is salvaged
+after truncation, both argument wires the harness has used, the frame's CSP, and
+the tool contract.
 
-Two checks are deliberate regression guards rather than behavior tests — the
-module must import nothing, and `output.schema` must stay closed. Both encode
-mistakes that fail loudly at harness boot rather than at unit-test time.
+Three checks are deliberate regression guards rather than behavior tests — the
+module must import nothing, `output.schema` must stay closed, and the client half
+must require only `react`. All encode mistakes that fail loudly at harness boot
+rather than at unit-test time.
 
 ## License
 
