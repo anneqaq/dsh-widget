@@ -37,12 +37,12 @@ function loadClientModule() {
 const mod = loadClientModule()
 const {
   readWidget, normalize, extractClosedString, extractOpenString, salvageFragment, buildSrcDoc,
-  argumentSize, hasArgumentView,
+  argumentSize, hasArgumentView, defineWidgetNode, resultOf, WIDGET_NODE_KIND, WIDGET_TOOL_NAME,
 } = mod.__internals
 
 test('plugin surface follows the function-form contract', () => {
   assert.equal(typeof mod.apply, 'function')
-  assert.deepEqual(mod.inject, ['slots'])
+  assert.deepEqual(mod.inject, ['slots', 'uiConversation'], 'the Turn-level projection needs the chat engine')
   assert.ok(!('default' in mod), 'function form must not also carry a default export')
 })
 
@@ -393,4 +393,137 @@ test('argumentSize follows whichever wire the node carries', () => {
   assert.equal(argumentSize({ args: argumentView({ html: '<p>hi', title: 't' }, { closed: false }) }), 5)
   assert.equal(argumentSize({}), -1)
   assert.equal(argumentSize(null), -1)
+})
+
+// ── Turn-level projection ────────────────────────────────────────────────────
+
+/**
+ * Drive the Definition through the same three calls the chat engine makes, for
+ * one ordered event list, and return the node it would publish.
+ *
+ * The engine routes `match` per event, keeps a Context per call id, calls
+ * `start` for `role: "start"` and `update` for `role: "update"`, then asks
+ * `buildViewNode` for a node. Replaying that here is what lets the projection be
+ * asserted without a browser.
+ *
+ * @param definition - a Definition from `defineWidgetNode`.
+ * @param events - Session events in seq order.
+ * @param contextKey - the engine-owned key for the first Context.
+ */
+function project(definition, events, contextKey = 'chat:call:7') {
+  let context = null
+  for (const event of events) {
+    const matched = definition.match(event)
+    if (matched === null) continue
+    if (matched.role === 'start') {
+      context = {
+        key: contextKey,
+        kind: definition.kind,
+        id: matched.id,
+        start: { event, role: 'start', location: { kind: 'turn' } },
+        matches: [{ event, role: 'start', location: { kind: 'turn' } }],
+        state: undefined,
+        current: new Map(),
+      }
+      context.state = definition.start(context, context.matches[0])
+    } else if (context !== null) {
+      const match = { event, role: 'update', location: { kind: 'turn' } }
+      context.matches.push(match)
+      context.state = definition.update(context, match)
+    }
+  }
+  return context === null ? null : definition.buildViewNode(context)
+}
+
+/** A `tool/call` event as the Session records it. */
+const callEvent = (name, args, callId = 'call-7', seq = 7) => ({
+  type: 'tool/call',
+  seq,
+  data: { callId, name, arguments: args, turn: 1, step: 1 },
+})
+
+/** A `tool/result` event as the Session records it. */
+const resultEvent = (callId = 'call-7', { isError = false, error, seq = 8 } = {}) => ({
+  type: 'tool/result',
+  seq,
+  data: { message: { source: { callId }, isError }, error },
+})
+
+test('the Definition mirrors the widget tool on the chat target', () => {
+  const definition = defineWidgetNode()
+  assert.equal(definition.kind, WIDGET_NODE_KIND)
+  assert.equal(definition.target, 'chat')
+  assert.equal(typeof definition.match, 'function')
+  assert.equal(typeof definition.start, 'function')
+  assert.equal(typeof definition.update, 'function')
+  assert.equal(typeof definition.buildViewNode, 'function')
+  assert.equal(WIDGET_TOOL_NAME, 'render_widget')
+})
+
+test('the Definition routes only render_widget calls and their results', () => {
+  const definition = defineWidgetNode()
+  assert.equal(definition.match(callEvent('bash', '{"command":"ls"}')), null, 'another tool must not be claimed')
+  assert.equal(definition.match({ type: 'assistant/message', seq: 1, data: {} }), null, 'unrelated events are ignored')
+  assert.equal(definition.match(resultEvent('never-started')), null, 'a result with no widget call is ignored')
+
+  const started = definition.match(callEvent('render_widget', '{"html":"<p>x</p>"}'))
+  assert.deepEqual(started, { id: 'call-7', role: 'start' })
+  assert.deepEqual(definition.match(resultEvent()), { id: 'call-7', role: 'update' })
+})
+
+test('resultOf reads the result defensively', () => {
+  assert.deepEqual(resultOf(resultEvent('c1')), { callId: 'c1', isError: false, error: undefined })
+  assert.equal(resultOf({ type: 'tool/result', seq: 1, data: {} }), null)
+  assert.equal(resultOf({ type: 'tool/result', seq: 1, data: { message: {} } }), null)
+  assert.equal(resultOf(null), null)
+})
+
+test('a settled widget is projected at Turn level, outside the process group', () => {
+  const node = project(defineWidgetNode(), [
+    callEvent('render_widget', '{"html":"<svg/>","title":"图","height":260}'),
+    resultEvent(),
+  ])
+  assert.ok(node, 'a settled widget must produce a node')
+  assert.equal(node.kind, WIDGET_NODE_KIND)
+  assert.equal(node.target, 'chat')
+  assert.equal(node.key, 'chat:call:7', 'the engine requires the Context key')
+  assert.equal(node.visibility, 'visible')
+  // This is the whole mechanism: at-or-outside "process", so the group folds
+  // before the node instead of swallowing it.
+  assert.equal(node.groupTree, 'turn')
+  assert.equal(node.anchorSeq, 7)
+  assert.equal(node.data.widget.status, 'ready')
+  assert.equal(node.data.widget.html, '<svg/>')
+  assert.equal(node.data.callId, 'call-7')
+})
+
+test('a still-running widget is left to the tool row', () => {
+  const definition = defineWidgetNode()
+  const node = project(definition, [callEvent('render_widget', '{"html":"<svg/>"}')])
+  assert.equal(node, null, 'no node until the call settles')
+})
+
+test('a failed widget is left to the tool row', () => {
+  const node = project(defineWidgetNode(), [
+    callEvent('render_widget', '{"html":"<svg/>"}'),
+    resultEvent('call-7', { isError: true, error: { name: 'Error', code: 'E', reason: 'nope' } }),
+  ])
+  assert.equal(node, null, 'tool diagnostics stay in the group')
+})
+
+test('a salvaged fragment is projected with its truncation flag', () => {
+  const node = project(defineWidgetNode(), [
+    callEvent('render_widget', '{"html":"<svg><g><circle r=\\"3\\"/>'),
+    resultEvent(),
+  ])
+  assert.ok(node)
+  assert.equal(node.data.widget.truncated, true)
+})
+
+test('a projected node never claims another tool call', () => {
+  const node = project(defineWidgetNode(), [
+    callEvent('bash', '{"command":"ls"}'),
+    resultEvent(),
+  ])
+  assert.equal(node, null)
 })

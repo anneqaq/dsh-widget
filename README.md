@@ -145,10 +145,44 @@ renders through a **sandboxed `srcdoc` frame**, never through
   ceiling is unreachable and the budget is what actually binds. The hard ceiling
   still bounds the transcript and the wire request.
 - **No network in the frame**, by design. Inline everything.
-- **The card is a tool row, not prose.** It renders where the call sits in the
-  turn. Inline-in-the-middle-of-a-paragraph rendering is not available through
-  a public extension point; the `tool.call.toolview` slot is the sanctioned
-  seam.
+
+## Where the card lives
+
+A tool call is *machinery*, and `dsh`'s compact, standard and detailed
+presentation modes fold a Turn's machinery into a collapsed process group. A card
+rendered only through the `tool.call.toolview` slot therefore needs that group
+expanded to be seen — which is the wrong trade for the one surface in the
+conversation whose whole point is being looked at.
+
+So the card is rendered **twice from one projection, in two places**:
+
+| Surface | Slot | When |
+| --- | --- | --- |
+| The Turn flow, outside the folded group | `conversation.chat.node` (keyed `dsh-widget-card`) | once the call settles |
+| The tool row inside the process group | `tool.call.toolview` (keyed `render_widget`) | while arguments stream |
+
+The mechanism is a conversation Definition registered on
+`ctx.uiConversation.events.register`: it mirrors `render_widget`'s `tool/call` and
+`tool/result` events and publishes a node with `groupTree: "turn"`. The engine's
+group tree is `{exchange: 0, input: 1, turn: 2, process: 3}` and a node is
+at-or-outside a position when its `groupTree` depth is `<=` that position's, so
+`"turn"` makes the process group flush *before* the node instead of swallowing
+it. A second Definition may mirror the same event because a claim is only
+exclusive when the match result says `exclusive: true`, and the chat package's
+tool Definition never does.
+
+Two consequences worth knowing:
+
+- **No duplicate card.** Once the node is projected, the tool row collapses to a
+  one-line `shown above` stand-in (same title, size, and `Inspect` action), so
+  expanding the group does not show the same figure twice.
+- **It degrades safely.** The definition is registered inside a guard. If a
+  runtime refuses it, the flag that drives both sides stays false and the card
+  goes back to living entirely in the tool row — the card loses its position,
+  never its existence.
+
+Inline-in-the-middle-of-a-paragraph rendering is still not available: the card is
+a node in the flow, so it sits where the call sits, not inside a sentence.
 
 ## Compatibility
 
@@ -190,10 +224,11 @@ one would add a gate without adding truth.
 npm test
 ```
 
-63 tests, no browser and no harness required. They run the real projections:
+71 tests, no browser and no harness required. They run the real projections:
 the streaming-JSON recovery that decides whether a card renders or is salvaged
-after truncation, both argument wires the harness has used, the frame's CSP, and
-the tool contract.
+after truncation, both argument wires the harness has used, the Turn-level node
+projection (driven through the same three calls the chat engine makes), the
+frame's CSP, and the tool contract.
 
 Three checks are deliberate regression guards rather than behavior tests — the
 module must import nothing, `output.schema` must stay closed, and the client half

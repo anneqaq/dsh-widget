@@ -1,6 +1,6 @@
 {
   "name": "dsh-widget",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Inline visualization widgets for DeepSeek Harness: render model-authored SVG/HTML fragments as isolated visual cards inside the conversation.",
   "type": "module",
   "main": "lib/index.js",
